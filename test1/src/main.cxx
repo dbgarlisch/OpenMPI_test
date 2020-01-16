@@ -1,52 +1,14 @@
-/*
-from: https://computing.llnl.gov/tutorials/mpi/#Point_to_Point_Routines
+// based on: https://computing.llnl.gov/tutorials/mpi/#Point_to_Point_Routines
 
-PSEUDO MPI CODE
-
-    npoints = 10000
-    circle_count = 0
-
-    p = number of tasks
-    num = npoints/p
-
-    find out if I am MASTER or WORKER
-
-    do j = 1,num
-      generate 2 random numbers between 0 and 1
-      xcoordinate = random1
-      ycoordinate = random2
-      if (xcoordinate, ycoordinate) inside circle
-      then circle_count = circle_count + 1
-    end do
-
-    if I am MASTER
-      receive from WORKERS their circle_counts
-      compute PI (use MASTER and WORKER calculations)
-    else if I am WORKER
-      send to MASTER circle_count
-    endif
-*/
-
-
-
-/**********************************************************************
-NOTE:
-    https://computing.llnl.gov/tutorials/mpi/samples/C/mpi_pi_reduce.c
-    The example code provided on the website is a horrible implementation of the
-    pseudo code given above! The code below is modifed to better represent the
-    pseudo code.
-**********************************************************************/
-#include <stdio.h>
-#include <stdlib.h>
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <string>
 #include <random>
 
 #include "mpi.h"
 
 using Hits = uint64_t;
-
-static constexpr Hits TOTAL_DARTS{ int(5e6) }; // TOTAL throws at dartboard
-static constexpr int MASTER{ 0 };              // master task ID
-
 
 static constexpr bool
 MPIOK(const int rc) {
@@ -57,10 +19,13 @@ MPIOK(const int rc) {
 static Hits
 dboardHits(const Hits numDarts, const int taskId)
 {
+    std::hash<long long> hll;
+    const std::size_t rngSeed{ hll(hll(taskId + time(nullptr)) +
+        hll(std::chrono::system_clock::now().time_since_epoch().count())) };
     // The random number generator
-    std::mt19937_64 rng(taskId);
+    std::mt19937_64 rng(rngSeed);
     constexpr auto rngSpan{ rng.max() - rng.min() };
-    auto getCoordSquared = [&rng, rngSpan]()->double {
+    auto randCoordSquared = [&rng, rngSpan]()->double {
         // calc random coord [-1.0, 1.0]
         const double coord{ ((2.0 * (rng() - rng.min())) / rngSpan) - 1.0 };
         return coord * coord;
@@ -70,7 +35,7 @@ dboardHits(const Hits numDarts, const int taskId)
     Hits hits = 0;
     for (Hits n = 0; n < numDarts; ++n) {
         // Is (x^2 + y^2) <= 1.0^2 ?
-        if ((getCoordSquared() + getCoordSquared()) <= 1.0) {
+        if ((randCoordSquared() + randCoordSquared()) <= 1.0) {
             // dart landed in circle! Increment hits.
             ++hits;
         }
@@ -117,7 +82,8 @@ static_assert(sizeof(Hits) == sizeof(unsigned long long), "Size mismatch");
 int
 main(int argc, char *argv[])
 {
-    const MPI_Comm Comm{ MPI_COMM_WORLD };
+    constexpr int MASTER{ 0 }; // master task ID
+    constexpr MPI_Comm Comm{ MPI_COMM_WORLD };
 
     int ret = ErrNone;
     int taskId = 0;	// task ID - also used as seed number
@@ -136,6 +102,19 @@ main(int argc, char *argv[])
     else {
         const bool isMasterTask = (MASTER == taskId);
 
+        Hits totalNumThrows{ int(5e6) }; // TOTAL throws at dartboard
+
+        int ii = 1;
+        while (ii < argc) {
+            const std::string arg{ argv[ii++] };
+            if ((("-t" == arg) || ("--throws" == arg)) && (ii < argc)) {
+                totalNumThrows = atoll(argv[ii++]);
+                if (isMasterTask) {
+                    std::cout << ">> set totalNumThrows=" << totalNumThrows << std::endl;
+                }
+            }
+        }
+
         int version;
         int subversion;
         if (isMasterTask && MPIOK(MPI_Get_version(&version, &subversion))) {
@@ -147,10 +126,10 @@ main(int argc, char *argv[])
         fflush(stdout);
 
         // Each subtask will throw this many darts
-        Hits numThrows = TOTAL_DARTS / numtasks;
+        Hits numThrows = totalNumThrows / numtasks;
         if (isMasterTask) {
             // Master task will pick up any throws lost to integer truncation
-            numThrows += (TOTAL_DARTS % numThrows);
+            numThrows += (totalNumThrows % numThrows);
         }
 
         // Use MPI_Reduce to sum values of piTask across all tasks and stores
@@ -183,9 +162,9 @@ main(int argc, char *argv[])
             // Master and all subtasks have computed their values for PI. The
             // call to MPI_Reduce() has summed them all together and placed
             // result into sumHits.
-            printf("After %llu throws...\n", TOTAL_DARTS);
+            printf("After %llu throws...\n", totalNumThrows);
             fflush(stdout);
-            const double computedPi{ (4.0 * sumHits) / TOTAL_DARTS };
+            const double computedPi{ (4.0 * sumHits) / totalNumThrows };
             const double actualPi{ 3.1415926535897 };
             printf("  Computed PI: %.8f\n", computedPi);
             fflush(stdout);
